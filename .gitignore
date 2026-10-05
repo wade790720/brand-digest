@@ -1,0 +1,60 @@
+# 注意：git 只把「行首」的 # 當註解，規則後面不能接註解，否則規則會失效。
+
+# ───────── 機密：絕對不能上傳 ─────────
+# API 金鑰
+.env
+# 個人設定（config.example.py 才是要提交的範本）
+config.py
+# 剪輯 pipeline 的品牌／受眾設定（brand_profile.example.json 才是範本）
+brand_profile.json
+# IG 登入 session
+*.session
+session-*
+
+# ───────── 使用者資料 / 產出 / 快取 ─────────
+# 抓下來的影片與貼文
+raw/
+# 產出的知識庫 Markdown
+output/
+# 音軌、字幕、逐篇萃取、posts.json、archived.json、ig_user.txt…
+.cache/
+
+# ───────── 打包產物（PyInstaller）─────────
+build/
+dist/
+*.spec
+
+# ───────── Python ─────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+
+# ───────── 編輯器 / 作業系統 ─────────
+.vscode/
+.idea/
+# Claude Code 本機工具設定（launch.json 等）
+.claude/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ───────── reel/ 宣傳短片錄製工具：只提交腳本，相依套件與產出素材不進版控 ─────────
+# npm install 會裝回來（含 79 MB 的 ffmpeg.exe）
+reel/node_modules/
+# 逐幀截圖、互動實錄的暫存影格
+reel/frames*/
+reel/live-rec*/
+reel/*.jpg
+reel/*.png
+reel/*.webm
+
+# ───────── 媒體 / 暫存 ─────────
+*.log
+*.wav
+*.mp4
