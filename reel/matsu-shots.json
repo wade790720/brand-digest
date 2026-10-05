@@ -1,0 +1,8 @@
+[
+  { "name": "hero-island",   "dur": 3.4, "from": { "cx": 2160, "cy": 2000, "vw": 3800 }, "to": { "cx": 2187, "cy": 1200, "vw": 2600 } },
+  { "name": "islands-map",   "dur": 3.0, "from": { "cx": 1700, "cy": 6800, "vw": 3000 }, "to": { "cx": 2450, "cy": 7100, "vw": 2400 } },
+  { "name": "nangan-sunset", "dur": 2.8, "from": { "cx": 2160, "cy": 9000, "vw": 2800 }, "to": { "cx": 2160, "cy": 9200, "vw": 2200 } },
+  { "name": "artworks-pan",  "dur": 3.2, "from": { "cx": 900,  "cy": 11170, "vw": 2600 }, "to": { "cx": 3300, "cy": 11170, "vw": 2600 } },
+  { "name": "artists-pan",   "dur": 3.2, "from": { "cx": 3300, "cy": 15726, "vw": 2600 }, "to": { "cx": 1000, "cy": 15726, "vw": 2600 } },
+  { "name": "beigan-out",    "dur": 3.4, "from": { "cx": 2160, "cy": 18100, "vw": 2200 }, "to": { "cx": 2160, "cy": 18300, "vw": 3400 } }
+]

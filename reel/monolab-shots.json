@@ -1,0 +1,8 @@
+[
+  { "name": "snow-hall-pan",  "img": "monolab-s0.png", "dur": 3.2, "from": { "cx": 1000, "cy": 1450, "vw": 1518 }, "to": { "cx": 3100, "cy": 1400, "vw": 1380 } },
+  { "name": "magic-box",      "img": "monolab-s1.png", "dur": 3.0, "from": { "cx": 800,  "cy": 950,  "vw": 1500 }, "to": { "cx": 1800, "cy": 1400, "vw": 1400 } },
+  { "name": "code-room-pan",  "img": "monolab-s2.png", "dur": 3.0, "from": { "cx": 1100, "cy": 1500, "vw": 1500 }, "to": { "cx": 3300, "cy": 1500, "vw": 1450 } },
+  { "name": "ring-push-in",   "img": "monolab-s3.png", "dur": 3.0, "from": { "cx": 2250, "cy": 1000, "vw": 1518 }, "to": { "cx": 2250, "cy": 850,  "vw": 1200 } },
+  { "name": "entropy-drift",  "img": "monolab-s4.png", "dur": 3.0, "from": { "cx": 2220, "cy": 950,  "vw": 1500 }, "to": { "cx": 2220, "cy": 780,  "vw": 1280 } },
+  { "name": "entropy-out",    "img": "monolab-s5.png", "dur": 3.2, "from": { "cx": 2700, "cy": 1400, "vw": 1200 }, "to": { "cx": 2160, "cy": 1350, "vw": 1518 } }
+]

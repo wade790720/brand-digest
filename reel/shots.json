@@ -1,0 +1,8 @@
+[
+  { "name": "hero-push-in",   "dur": 3.4, "from": { "cx": 2160, "cy": 2600, "vw": 3600 }, "to": { "cx": 1300, "cy": 1000, "vw": 2300 } },
+  { "name": "ink-detail",     "dur": 2.6, "from": { "cx": 2200, "cy": 930,  "vw": 1600 }, "to": { "cx": 2300, "cy": 990, "vw": 1300 } },
+  { "name": "philosophy",     "dur": 3.0, "from": { "cx": 1250, "cy": 3900, "vw": 2300 }, "to": { "cx": 1250, "cy": 5300, "vw": 2300 } },
+  { "name": "cards-pan",      "dur": 3.4, "from": { "cx": 1150, "cy": 8100, "vw": 2700 }, "to": { "cx": 3200, "cy": 8100, "vw": 2700 } },
+  { "name": "quote",          "dur": 2.8, "from": { "cx": 1500, "cy": 13450, "vw": 2600 }, "to": { "cx": 1500, "cy": 13800, "vw": 2350 } },
+  { "name": "cta-pull-out",   "dur": 3.4, "from": { "cx": 2000, "cy": 15750, "vw": 2000 }, "to": { "cx": 2000, "cy": 15850, "vw": 3300 } }
+]
