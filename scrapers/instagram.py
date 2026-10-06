@@ -27,6 +27,7 @@ _LAST_USER_FILE = ROOT / ".cache" / "ig_user.txt"
 
 # —— 安全參數（保守；本帳號請勿調快）——
 SLEEP_MIN, SLEEP_MAX = 15, 40      # 每則貼文間的隨機延遲（秒），這才是主要防護
+POST_SLEEP_MIN, POST_SLEEP_MAX = 4, 10  # 單則連結模式（不登入）每則下載間的隨機延遲（秒），保護 IP
 MAX_PER_RUN = 15                   # 登入狀態單次上限
 COOLDOWN_SEC = 20                  # 只防手滑連點（按鈕 loading 已擋大部分）；連抓下一批是正常用法
 _FETCH_LOG = ROOT / ".cache" / "last_fetch.json"   # 記各博主上次抓取時間
@@ -238,8 +239,9 @@ def _set_backoff(reason: str):
 
 def _backoff_message(left: float) -> str:
     at = time.strftime("%H:%M", time.localtime(time.time() + left))
-    return (f"IG 目前限制你的帳號查詢。為了保護帳號，博主模式暫停到 {at}（約 {-(-int(left) // 60)} 分鐘後）。"
-            f"這段時間請不要重複嘗試，反覆嘗試可能讓 IG 要求驗證或鎖帳號。單則貼文連結不受影響。")
+    return (f"IG 擋下了博主模式的查詢（你平常用 IG 通常不受影響）。為了保護帳號，博主模式暫停到 {at}（約 {-(-int(left) // 60)} 分鐘後）。"
+            f"這段時間請不要重複嘗試，反覆嘗試可能讓 IG 要求驗證或鎖帳號。建議改用不需要登入的方式：在 Chrome 打開博主的 Reels 頁往下滑，"
+            f"再用 ig-sorter 的右鍵選單「把這頁的貼文送到 brand-digest」。")
 
 
 def _exit_connection_error(err: Exception):
@@ -308,6 +310,9 @@ def fetch_posts(urls: list[str]) -> set[str]:
                     "url": info.get("webpage_url") or url,
                 })
                 print(f"  [{i}/{len(urls)}] OK：{name} / {info.get('id')}")
+                if i < len(urls):
+                    # 不登入也要像人：一次送幾十則時，連續下載可能讓 IG 暫時擋掉這個 IP
+                    time.sleep(random.uniform(POST_SLEEP_MIN, POST_SLEEP_MAX))
             except Exception as err:
                 print(f"  [{i}/{len(urls)}] 跳過 {url}：{str(err).splitlines()[0]}")
 
