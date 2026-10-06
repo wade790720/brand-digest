@@ -130,9 +130,15 @@ pip install nvidia-cudnn-cu12 nvidia-cublas-cu12
 1. 等幾分鐘再跑（快取會接續，已完成的不重跑）
 2. `config.py` 切 `LLM_PROVIDER = "groq"`
 
-### Instaloader `checkpoint_required` / 401
-IG 風控把帳號標記了。到手機 App 或網頁完成安全驗證，換個時間再抓。
+### 「IG 目前限制你的帳號查詢」/ `checkpoint_required` / 401 / 403
+IG 風控在限制這個帳號。程式會自動暫停博主模式 30 分鐘（記在 `.cache/ig_backoff.json`），
+期間不發任何請求，避免限制升級成鎖帳號。單則貼文連結不受影響。
+- checkpoint：到手機 App 完成安全驗證，再到「設定 → IG 帳號」重新登入。
+- 確定要提早解除：刪掉 `.cache/ig_backoff.json`（不建議）。
+- IG 被擋時，instaloader 也會誤報「帳號不存在」。程式會先驗證登入狀態再判斷。
+
 守則：①用小號 ②一次只抓一個博主 ③在家用網路 ④別調快內建延遲。
+自我檢查（不會對 IG 發請求）：`python -m scrapers.test_instagram_errors`
 
 ### `找不到 ffmpeg` 但明明裝了
 winget 裝完要**重開終端機**才會更新 PATH。

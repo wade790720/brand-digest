@@ -156,19 +156,24 @@ def fetch(profile_url: str, limit: int = 30, user: str | None = None) -> str:
               f"其餘下次再抓（已抓的會自動跳過）。")
         limit = MAX_PER_RUN
 
+    # 安全防護④：IG 剛限制過這個帳號，冷卻期內一律不再發請求，避免限制升級成驗證或鎖帳號。
+    left = backoff_remaining()
+    if left > 0:
+        sys.exit(_backoff_message(left))
+
     loader = _make_loader()
     _ensure_login(loader, user)
 
     seen_file = ROOT / ".cache" / username / "seen.txt"
     seen = _known_shortcodes(username)   # 多來源聯集，避免重抓同一批
     skipped = 0
+    count = 0
+    new_records = []
 
     try:
         profile = instaloader.Profile.from_username(loader.context, username)
         print(f"開始抓「{username}」接下來 {limit} 則『未抓過』的貼文"
               f"（已收錄 {len(seen)} 則會自動跳過；每則間隔 {SLEEP_MIN}~{SLEEP_MAX} 秒保護帳號）…")
-        count = 0
-        new_records = []
         for post in profile.get_posts():
             if count >= limit:
                 break
@@ -184,34 +189,86 @@ def fetch(profile_url: str, limit: int = 30, user: str | None = None) -> str:
             new_records.append({"date": date, "shortcode": post.shortcode,
                                 "url": f"https://www.instagram.com/p/{post.shortcode}/"})
             print(f"  [{count}/{limit}] {date} {post.shortcode}")
-        seen_file.parent.mkdir(parents=True, exist_ok=True)
-        seen_file.write_text("\n".join(sorted(seen)), encoding="utf-8")
-        if new_records:
-            record_posts(username, new_records)
         _mark_fetch(username)           # 記錄本次抓取時間，供下次冷卻判斷
         if count == 0:
             print(f"沒有更多新貼文了（已跳過 {skipped} 則抓過的，該帳號沒有更舊/更新的可抓）。")
         else:
             print(f"本次新增 {count} 則（跳過 {skipped} 則已收錄）。")
-    except (instaloader.exceptions.LoginRequiredException,
-            instaloader.exceptions.ConnectionException) as err:
-        sys.exit(
-            f"IG 擋下了匿名抓取（{err}）。\n"
-            f"請用小號登入再試：python go.py {profile_url} --user 你的IG小號\n"
-            f"（若跳出 checkpoint_required，到手機 App 完成安全驗證後再跑一次）"
-        )
     except instaloader.exceptions.ProfileNotExistsException:
-        # 注意：IG 對匿名請求回 403 時，instaloader 也會誤報成「帳號不存在」。
-        # 沒登入的情況下先引導登入，別讓使用者以為打錯帳號。
-        if not loader.context.is_logged_in:
-            sys.exit(
-                f"IG 擋下匿名查詢（也可能帳號真的不存在）。IG 現在幾乎強制登入才能抓，\n"
-                f"請用小號登入再試：python go.py {profile_url} --user 你的IG小號"
-            )
-        sys.exit(f"找不到帳號「{username}」，確認網址拼字，或該帳號是私人帳號。")
+        _exit_not_found(loader, username)
+    except instaloader.exceptions.LoginRequiredException:
+        sys.exit("IG 需要登入才能讀取這位博主。請到「設定 → IG 帳號」登入（建議用小號），再按一次萃取。")
+    except (instaloader.exceptions.ConnectionException,
+            instaloader.exceptions.QueryReturnedForbiddenException) as err:
+        _exit_connection_error(err)
+    finally:
+        # 中途被擋也要存進度：已下載的貼文下次不能被當成沒抓過而重抓
+        if new_records:
+            seen_file.parent.mkdir(parents=True, exist_ok=True)
+            seen_file.write_text("\n".join(sorted(seen)), encoding="utf-8")
+            record_posts(username, new_records)
 
     print(f"抓取完成，素材在 raw/{username}/")
     return username
+
+
+# —— IG 限制時的冷卻 ——
+# IG 回「請稍候」「403」「checkpoint」時，代表帳號正被風控盯上。這時再送請求，
+# 限制可能升級成要求驗證甚至鎖帳號。所以記下冷卻截止時間，期間博主模式一律不發請求。
+BACKOFF_SEC = 30 * 60
+_BACKOFF_FILE = ROOT / ".cache" / "ig_backoff.json"
+
+
+def backoff_remaining() -> float:
+    """IG 冷卻還剩幾秒；0 代表可以抓。"""
+    try:
+        until = json.loads(_BACKOFF_FILE.read_text(encoding="utf-8")).get("until", 0)
+    except (OSError, ValueError):
+        return 0
+    return max(0.0, until - time.time())
+
+
+def _set_backoff(reason: str):
+    _BACKOFF_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _BACKOFF_FILE.write_text(json.dumps({"until": time.time() + BACKOFF_SEC, "reason": reason},
+                                        ensure_ascii=False), encoding="utf-8")
+
+
+def _backoff_message(left: float) -> str:
+    at = time.strftime("%H:%M", time.localtime(time.time() + left))
+    return (f"IG 目前限制你的帳號查詢。為了保護帳號，博主模式暫停到 {at}（約 {-(-int(left) // 60)} 分鐘後）。"
+            f"這段時間請不要重複嘗試，反覆嘗試可能讓 IG 要求驗證或鎖帳號。單則貼文連結不受影響。")
+
+
+def _exit_connection_error(err: Exception):
+    s = str(err).lower()
+    if "checkpoint" in s or "challenge" in s:
+        _set_backoff("checkpoint")
+        sys.exit("IG 要求驗證你的帳號（checkpoint）。請用手機打開 Instagram App 完成驗證，"
+                 "再到「設定 → IG 帳號」重新登入。博主模式已暫停 30 分鐘。")
+    if "please wait" in s or "401" in s or "429" in s:
+        _set_backoff("throttled")
+        sys.exit(_backoff_message(BACKOFF_SEC))
+    if "403" in s or "forbidden" in s:
+        _set_backoff("forbidden")
+        sys.exit("IG 拒絕了這次請求（403）。通常是帳號正被暫時限制，或登入狀態已失效。"
+                 "博主模式已暫停 30 分鐘；之後仍失敗，請到「設定 → IG 帳號」重新登入。")
+    sys.exit(f"連不上 Instagram，請檢查網路後再試。（{str(err).splitlines()[0][:120]}）")
+
+
+def _exit_not_found(loader, username: str):
+    """IG 擋下請求時，instaloader 也會丟「帳號不存在」，不能直接相信。
+    已登入時多驗證一次登入狀態：驗證失敗代表 IG 在限制我們，不是帳號不存在。"""
+    if not loader.context.is_logged_in:
+        sys.exit("IG 擋下了未登入的查詢（也可能帳號名稱拼錯）。請到「設定 → IG 帳號」登入（建議用小號），再按一次萃取。")
+    try:
+        ok = loader.test_login()
+    except Exception:
+        ok = None
+    if not ok:
+        _set_backoff("session check failed")
+        sys.exit(f"這不代表「{username}」不存在。{_backoff_message(BACKOFF_SEC)}")
+    sys.exit(f"找不到帳號「{username}」。請確認網址拼字；如果是私人帳號，需要先用登入的帳號追蹤對方才抓得到。")
 
 
 def fetch_posts(urls: list[str]) -> set[str]:

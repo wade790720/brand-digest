@@ -1730,6 +1730,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             skip_fetch = bool(body.get("skip_fetch"))
             if skip_fetch and creator and not (ROOT / "raw" / creator).is_dir():
                 return self._json({"error": f"「{creator}」還沒有抓過任何貼文。請取消勾選「不重抓」，再開始萃取。"}, 400)
+            if creator and not skip_fetch:
+                # IG 冷卻中：直接擋，不開任務也不記錯誤報告（這是保護機制，不是 bug）
+                from scrapers.instagram import backoff_remaining, _backoff_message
+                left = backoff_remaining()
+                if left > 0:
+                    return self._json({"error": _backoff_message(left)}, 400)
             _state.update(running=True, log=[], creator=creator, ok=None, error="", report_id="")
             _run_args.clear()
             _run_args.update(urls=urls, limit=int(body.get("limit", 10)), skip_fetch=skip_fetch)
