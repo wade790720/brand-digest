@@ -48,7 +48,7 @@ if __name__ == "__main__":
     assert _run(E.ConnectionException("checkpoint_required"))[1]
     # 回「不存在」但登入驗證失敗：其實是被限制，不能說帳號不存在
     msg, cooled = _run(E.ProfileNotExistsException("x"), login_ok=None)
-    assert cooled and "不代表" in msg
+    assert cooled and "不是帳號不存在" in msg
     # 登入正常才相信「不存在」
     msg, cooled = _run(E.ProfileNotExistsException("x"), login_ok="me")
     assert not cooled and "找不到帳號" in msg

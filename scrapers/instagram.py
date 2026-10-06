@@ -267,7 +267,7 @@ def _exit_not_found(loader, username: str):
         ok = None
     if not ok:
         _set_backoff("session check failed")
-        sys.exit(f"這不代表「{username}」不存在。{_backoff_message(BACKOFF_SEC)}")
+        sys.exit(f"IG 沒有回傳「{username}」的資料，原因是被限制，不是帳號不存在。{_backoff_message(BACKOFF_SEC)}")
     sys.exit(f"找不到帳號「{username}」。請確認網址拼字；如果是私人帳號，需要先用登入的帳號追蹤對方才抓得到。")
 
 
