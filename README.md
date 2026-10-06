@@ -88,6 +88,28 @@ python web.py    # → http://localhost:8765
 產出在 `output/<博主>.md`。每階段結果（音軌 / 字幕 / 逐篇萃取）都快取在
 `.cache/<博主>/`，重跑不會浪費 GPU 時間或 LLM 額度；想強制重跑就刪對應快取檔。
 
+## 錯誤回報（給開發者）
+
+程式出錯時會自動記錄，使用者也可以在「設定 → 錯誤回報」補充說明後送出。
+
+- 報告存在 `.cache/error_reports.jsonl`，一行一筆 JSON，最新的在最後。
+- 寫入前會遮蔽 API 金鑰、sessionid、密碼。
+- 來源（`source`）與類型（`kind`）：
+
+| source | kind | 什麼時候產生 |
+|---|---|---|
+| `run` | `run_failed` | 抓取或萃取任務失敗。`detail` 是最後 120 行執行紀錄 |
+| `provider` | `provider_failed` | AI 供應商呼叫失敗（額度不足、金鑰無效、限流…）。同一原因一次執行只記一筆 |
+| `server` | `server_exception` | 網頁伺服器處理請求時出錯。瀏覽器中斷連線不算 |
+| `frontend` | `frontend_error` | 網頁上沒被接住的 JS 錯誤。每個頁面最多 10 筆 |
+| `user` | `user_report` | 使用者按「送出回報」。會附上最近一次執行紀錄與 AI 設定（不含金鑰） |
+| `launcher` | `crash` | 整個程式崩潰 |
+
+- 每筆都有 `env.app`（版本＋git commit），可以對到出錯的程式版本。
+- 使用者可以按「複製給開發者」或「下載全部報告」把報告交給開發者。
+- 上平台後：設定環境變數 `REPORT_URL`，每筆報告會額外在背景 POST 到該網址。
+- 自我檢查（遮蔽、截斷、去重）：`python reporting.py`
+
 ## 常見錯誤排查
 
 ### `Could not locate cudnn_ops64_9.dll` / cuDNN 相關錯誤

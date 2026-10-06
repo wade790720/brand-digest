@@ -38,7 +38,15 @@ def _server():
 if __name__ == "__main__":
     import multiprocessing
     multiprocessing.freeze_support()          # PyInstaller 多行程保險
-    if len(sys.argv) > 1 and sys.argv[1] == "--pipeline":
-        _worker()
-    else:
-        _server()
+    worker = len(sys.argv) > 1 and sys.argv[1] == "--pipeline"
+    try:
+        _worker() if worker else _server()
+    except (SystemExit, KeyboardInterrupt):
+        raise                                   # 正常結束與使用者按 Ctrl+C 不是錯誤
+    except Exception as err:
+        # 整個程式崩潰：留一份錯誤報告再結束，下次開啟可在「設定 → 錯誤回報」看到
+        import traceback
+        import reporting
+        reporting.record("launcher", "crash", f"{type(err).__name__}: {err}", detail=traceback.format_exc(),
+                         context={"mode": "pipeline" if worker else "server"})
+        raise

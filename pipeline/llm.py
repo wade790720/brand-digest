@@ -87,7 +87,7 @@ def _call_anthropic(system: str, user: str) -> str:
         _clients["anthropic"] = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
     resp = _clients["anthropic"].messages.create(
         model=settings.ANTHROPIC_MODEL,
-        max_tokens=8192,
+        max_tokens=16000,     # 新模型會先思考再回答，給足空間避免長篇聚合被截斷
         system=system,
         messages=[{"role": "user", "content": user}],
     )
@@ -135,6 +135,41 @@ def generate(system: str, user: str) -> str:
             return _generate_with(_CALLS[prov], system, user)
         except Exception as err:
             last_err = err
+            reason = _short_reason(err)
+            _report_provider_failure(prov, err, reason)
             if prov != usable[-1]:
-                print(f"  {prov} 額度/限流用盡，改用備援供應商…")
+                print(f"  {prov} 失敗：{reason}。改用備援供應商…")
+            else:
+                print(f"  {prov} 失敗：{reason}")
     raise last_err
+
+
+def _short_reason(err: Exception) -> str:
+    """把供應商的錯誤翻成一句看得懂的原因，給使用者看。"""
+    s = str(err)
+    low = s.lower()
+    if "credit balance" in low or "billing" in low or "insufficient_quota" in low:
+        return "帳戶額度不足，請到該供應商後台儲值"
+    if _is_daily_quota(err):
+        return "今天的免費額度已用完"
+    if "429" in s or "rate limit" in low or "resource_exhausted" in low:
+        return "請求太頻繁，被限流"
+    if "401" in s or "authentication" in low or "invalid api key" in low or "invalid x-api-key" in low:
+        return "API 金鑰無效，請到設定重新填寫"
+    if "404" in s or "not_found" in low:
+        return "找不到這個模型，請到設定選擇其他模型"
+    if "503" in s or "overloaded" in low or "unavailable" in low:
+        return "供應商伺服器暫時過載"
+    return s.splitlines()[0][:160] if s else type(err).__name__
+
+
+def _report_provider_failure(provider: str, err: Exception, reason: str):
+    try:
+        import reporting
+    except ImportError:          # 從奇怪的工作目錄執行時找不到，就不記
+        return
+    reporting.record(
+        "provider", "provider_failed", f"{provider}：{reason}", detail=f"{type(err).__name__}: {err}",
+        context={"provider": provider, "model": getattr(settings, f"{provider.upper()}_MODEL", "")},
+        dedupe_key=f"{provider}:{reason}",
+    )

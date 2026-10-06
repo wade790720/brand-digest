@@ -17,13 +17,16 @@ import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-ROOT = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+import reporting
+
+ROOT =Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 PORT = 8765
 
 # 同時只允許一個任務（轉錄吃滿 GPU，跑兩個只會更慢）
 _lock = threading.Lock()
-# ok：None＝還沒跑完、True＝成功、False＝失敗（error 是給使用者看的原因）
-_state = {"running": False, "log": [], "creator": "", "ok": None, "error": ""}
+# ok：None＝還沒跑完、True＝成功、False＝失敗（error 是給使用者看的原因，report_id 是自動記錄的錯誤報告編號）
+_state = {"running": False, "log": [], "creator": "", "ok": None, "error": "", "report_id": ""}
+_run_args = {}   # 最近一次任務的參數，失敗時附進錯誤報告
 
 # 2FA 登入要分兩步，第一步的 loader 先留在記憶體等驗證碼
 _pending_2fa = {}
@@ -215,6 +218,30 @@ def _ask(creator: str, question: str) -> dict:
         return {"error": f"生成失敗：{str(err).splitlines()[0]}"}
 
 
+def _report_from_client(body: dict) -> dict:
+    """接收前端送來的報告。
+    frontend：網頁上的 JS 錯誤（自動送，同一個錯誤只記一次）。
+    user：使用者按「回報問題」送出的說明，會自動附上最近一次執行紀錄與 AI 設定（不含金鑰）。"""
+    source = body.get("source")
+    if source not in ("frontend", "user"):
+        return {"error": "回報來源不正確"}
+    message = str(body.get("message", "")).strip()
+    note = str(body.get("user_note", "")).strip()
+    if source == "user" and not (message or note):
+        return {"error": "請描述發生了什麼事，再送出回報。"}
+    ctx = body.get("context") if isinstance(body.get("context"), dict) else {}
+    detail = str(body.get("detail", ""))
+    if source == "user":
+        ctx = {**ctx, "related_report": str(body.get("related_report", ""))[:40],
+               "last_run": {k: _state[k] for k in ("creator", "ok", "error", "report_id")}, **_llm_context()}
+        if body.get("attach_log", True) and _state["log"]:
+            detail = (detail + "\n--- 最近一次執行紀錄 ---\n" + "\n".join(_state["log"][-120:])).strip()
+    kind = str(body.get("kind") or ("user_report" if source == "user" else "frontend_error"))[:40]
+    rep = reporting.record(source, kind, message or note[:120], detail=detail, context=ctx, user_note=note,
+                           dedupe_key=f"frontend:{message}:{detail[:200]}" if source == "frontend" else "")
+    return {"ok": True, "id": (rep or {}).get("id", "")}
+
+
 def _onboard_status() -> dict:
     from pipeline import settings
     return {"has_key": bool(settings.GROQ_API_KEY or settings.GEMINI_API_KEY),
@@ -247,7 +274,7 @@ def _list_models(provider: str) -> dict:
             ids = [m.id for m in OpenAI(api_key=key).models.list().data]
         elif provider == "anthropic":
             from anthropic import Anthropic
-            ids = [m.id for m in Anthropic(api_key=key).models.list().data]
+            ids = [m.id for m in Anthropic(api_key=key).models.list()]   # list() 會自動翻頁
         else:  # gemini
             from google import genai
             ids = [m.name.split("/")[-1] for m in genai.Client(api_key=key).models.list()
@@ -478,12 +505,28 @@ def _run(urls: list[str], limit: int, skip_fetch: bool):
     if code == 0:
         if not _state["creator"]:
             _state["creator"] = _latest_output_since(started)
-        _state.update(ok=True, error="")
+        _state.update(ok=True, error="", report_id="")
         _state["log"].append("（完成）")
     else:
-        _state.update(ok=False, error=_failure_reason(_state["log"]))
+        reason = _failure_reason(_state["log"])
+        rep = reporting.record(
+            "run", "run_failed", reason, detail="\n".join(_state["log"][-120:]),
+            context={**_run_args, "creator": _state["creator"], "exit_code": code,
+                     "seconds": round(time.time() - started, 1), **_llm_context()},
+        )
+        _state.update(ok=False, error=reason, report_id=(rep or {}).get("id", ""))
         _state["log"].append(f"（失敗，exit code {code}）")
     _state["running"] = False
+
+
+def _llm_context() -> dict:
+    """錯誤報告附上目前的 AI 設定（只有供應商與模型名稱，不含金鑰）。"""
+    try:
+        from pipeline import settings
+        return {"provider": settings.LLM_PROVIDER, "transcribe_backend": settings.TRANSCRIBE_BACKEND,
+                "configured_providers": [p for p in _PROVIDERS if getattr(settings, _PROVIDERS[p][2])]}
+    except Exception:
+        return {}
 
 
 PAGE = r"""<!doctype html><html lang="zh-Hant"><meta charset="utf-8">
@@ -570,7 +613,15 @@ PAGE = r"""<!doctype html><html lang="zh-Hant"><meta charset="utf-8">
   #runerr .re-title{font-size:1rem;font-weight:500;margin-bottom:.35rem}
   #runerr .re-msg{font-size:.9rem;line-height:1.5;word-break:break-word}
   #runerr .re-hint{font-size:.8rem;opacity:.8;margin-top:.5rem}
-  #runerr .re-actions{display:flex;gap:.5rem;margin-top:.8rem;flex-wrap:wrap}
+  #runerr .re-actions{display:flex;gap:.5rem;margin-top:.6rem;flex-wrap:wrap}
+  #runerr .re-actions[hidden]{display:none}
+  #runerr .re-btn{color:var(--on-error-container);padding:0 .75rem;margin-left:-.75rem;text-decoration:underline;text-underline-offset:3px}
+  /* 錯誤回報分頁 */
+  #rp_note{width:100%;resize:vertical;min-height:5rem;line-height:1.5}
+  .rp-item{padding:.8rem 0;border-top:1px solid var(--outline-variant)}
+  .rp-meta{font-size:.75rem;color:var(--on-surface-variant);margin-bottom:.2rem}
+  .rp-msg{font-size:.875rem;color:var(--on-surface);word-break:break-word;line-height:1.45}
+  .rp-item button{height:2rem;padding:0 .5rem;margin:.3rem 0 0 -.5rem;font-size:.8rem}
   /* 連線中斷橫幅 */
   #offbar{display:none;background:var(--error-container);color:var(--on-error-container);
     padding:.65rem 1.5rem;font-size:.85rem;position:sticky;top:0;z-index:9}
@@ -739,6 +790,7 @@ PAGE = r"""<!doctype html><html lang="zh-Hant"><meta charset="utf-8">
   .setrow>label{display:block;font-size:.8125rem;color:var(--on-surface-variant);margin-bottom:.65rem}
   .setrow .row{display:flex;gap:.6rem;flex-wrap:wrap}
   .setrow input{width:100%}
+  .setrow input[type=checkbox]{width:auto;flex:none}
   .setfoot{display:flex;align-items:center;gap:.6rem;padding:1.1rem 2.5rem;border-top:1px solid var(--outline-variant)}
   @media(max-width:640px){.setdlg{flex-direction:column;height:90vh}.setnav{width:auto;flex-direction:row;overflow-x:auto}
     .prov-fields{grid-template-columns:1fr}}
@@ -797,7 +849,10 @@ PAGE = r"""<!doctype html><html lang="zh-Hant"><meta charset="utf-8">
   <div id="runerr" role="alert" hidden>
     <div class="re-title">這次萃取沒有完成</div>
     <div class="re-msg" id="runerrmsg"></div>
-    <div class="re-hint">展開下方「執行紀錄」可以看完整過程。</div>
+    <div class="re-hint">展開下方「執行紀錄」可以看完整過程。<span id="runerrid"></span></div>
+    <div class="re-actions" id="runerracts" hidden>
+      <button class="text re-btn" onclick="openReport(lastReportId)">補充說明這個問題</button>
+    </div>
   </div>
 
   <details id="logbox" style="margin-top:1rem"><summary class="hint">執行紀錄（本次）</summary>
@@ -890,6 +945,7 @@ PAGE = r"""<!doctype html><html lang="zh-Hant"><meta charset="utf-8">
       <div class="setnav-title">設定</div>
       <button class="setnav-item on" id="snav-models" onclick="setTab('models')">🧠　AI 模型</button>
       <button class="setnav-item" id="snav-account" onclick="setTab('account')">📷　IG 帳號</button>
+      <button class="setnav-item" id="snav-reports" onclick="setTab('reports')">🐞　錯誤回報</button>
     </div>
     <div class="setbody">
       <button class="setclose" onclick="closeSettings()">✕</button>
@@ -931,13 +987,32 @@ PAGE = r"""<!doctype html><html lang="zh-Hant"><meta charset="utf-8">
           </div>
           <div id="loginmsg" class="hint"></div>
         </div>
+        <div id="pane-reports" class="setpane" style="display:none">
+          <h3>錯誤回報</h3>
+          <div class="hint">程式出錯時，會自動把錯誤記錄在這台電腦上，金鑰與密碼會先遮蔽。遇到問題時，在下面描述情況並送出，開發者會依這些報告修復。</div>
+          <div class="setrow" style="margin-top:1.5rem">
+            <label for="rp_note">發生了什麼事？</label>
+            <textarea id="rp_note" rows="4" placeholder="例如：貼上某位博主的網址、按「開始萃取」後，畫面停在…"></textarea>
+            <label class="hint" style="display:inline-flex;align-items:center;gap:.4rem;margin-top:.6rem"><input type="checkbox" id="rp_log" checked> 附上最近一次的執行紀錄</label>
+            <div class="row" style="margin-top:.75rem;align-items:center">
+              <button class="primary" onclick="sendReport()">送出回報</button>
+              <span id="rp_msg" class="hint" role="status"></span>
+            </div>
+          </div>
+          <div class="np-h" style="display:flex;justify-content:space-between;align-items:center">
+            <span>最近的錯誤（<span id="rp_count">0</span>）</span>
+            <a href="/reports/export" download>下載全部報告</a>
+          </div>
+          <div id="rp_list"></div>
+          <div class="hint" id="rp_ver" style="margin-top:1rem"></div>
+        </div>
       </div>
       <div class="setfoot">
-        <button class="danger text" onclick="logout()">登出 IG</button>
+        <button class="danger text" id="setlogout" onclick="logout()">登出 IG</button>
         <div style="flex:1"></div>
         <span id="setmsg" class="hint"></span>
         <button class="text" onclick="closeSettings()">關閉</button>
-        <button class="primary" onclick="saveSettings()">儲存</button>
+        <button class="primary" id="setsave" onclick="saveSettings()">儲存</button>
       </div>
     </div>
   </div>
@@ -952,9 +1027,21 @@ const PROVS = [
   {id:'openai', name:'OpenAI (ChatGPT)', ph:'sk-...', link:'https://platform.openai.com/api-keys', note:'gpt-4o 等',
    models:['gpt-4o-mini','gpt-4o','gpt-4.1-mini','gpt-4.1','o4-mini']},
   {id:'anthropic', name:'Claude', ph:'sk-ant-...', link:'https://console.anthropic.com/settings/keys', note:'Claude 系列',
-   models:['claude-sonnet-5','claude-opus-4-8','claude-haiku-4-5-20251001','claude-fable-5']},
+   models:['claude-opus-5-5','claude-sonnet-5-5','claude-haiku-4-5','claude-fable-5-1']},
 ];
 let current = "";
+// 網頁上沒被接住的 JS 錯誤，自動送回伺服器記錄。連線中斷造成的錯誤不是 bug，不送。
+let _feSent = 0;
+function reportClientError(message, detail){
+  message = String(message || '');
+  if (_feSent >= 10 || /Failed to fetch|NetworkError|Load failed/i.test(message)) return;   // 每頁最多 10 筆，避免錯誤迴圈洗版
+  _feSent++;
+  fetch('/report', {method:'POST', body: JSON.stringify({source:'frontend', kind:'frontend_error',
+    message: message.slice(0,300), detail: String(detail || '').slice(0,4000),
+    context: {view: current || 'home', ua: navigator.userAgent}})}).catch(()=>{});
+}
+window.addEventListener('error', e => reportClientError(e.message, (e.error && e.error.stack) || `${e.filename}:${e.lineno}:${e.colno}`));
+window.addEventListener('unhandledrejection', e => { const r = e.reason; reportClientError(r && r.message || r, r && r.stack); });
 function md2html(md){
   const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   const link = s => s.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,'<a href="$2" target="_blank">$1</a>');
@@ -1127,8 +1214,12 @@ function startCreator(){
   document.getElementById('skipfetch').checked = false;
   start();
 }
-function showRunError(msg){
+let lastReportId = '';
+function showRunError(msg, reportId){
+  lastReportId = reportId || '';
   document.getElementById('runerrmsg').textContent = msg;
+  document.getElementById('runerrid').textContent = lastReportId ? ` 已自動記錄這個錯誤（編號 ${lastReportId}）。` : '';
+  document.getElementById('runerracts').hidden = !lastReportId;
   document.getElementById('runerr').hidden = false;
   document.getElementById('runerr').scrollIntoView({block:'nearest'});
 }
@@ -1162,7 +1253,7 @@ async function poll(){
   watching = false;
   document.getElementById('skipfetch').checked = false;
   // 失敗：留在原畫面顯示原因，絕不改顯示別的博主（舊版會退回清單第一個，看起來像「跳回去」）
-  if (s.ok === false) { showRunError(s.error); document.getElementById('logbox').open = true; return; }
+  if (s.ok === false) { showRunError(s.error, s.report_id); document.getElementById('logbox').open = true; return; }
   if (s.ok && s.creator) showOutput(s.creator);
 }
 async function refreshLogin(){
@@ -1427,10 +1518,51 @@ async function detectModels(pid){
   msg.textContent = `✓ 這把 key 可用 ${r.models.length} 個模型，已列出可選`;
 }
 function setTab(t){
-  document.getElementById('pane-models').style.display = t==='models'?'block':'none';
-  document.getElementById('pane-account').style.display = t==='account'?'block':'none';
-  document.getElementById('snav-models').classList.toggle('on', t==='models');
-  document.getElementById('snav-account').classList.toggle('on', t==='account');
+  for (const p of ['models','account','reports']) {
+    document.getElementById('pane-'+p).style.display = t===p ? 'block' : 'none';
+    document.getElementById('snav-'+p).classList.toggle('on', t===p);
+  }
+  // 底部按鈕只在相關分頁出現：「儲存」只存 AI 模型設定，「登出 IG」只跟帳號有關
+  document.getElementById('setsave').style.display = t==='models' ? '' : 'none';
+  document.getElementById('setlogout').style.visibility = t==='account' ? 'visible' : 'hidden';
+  if (t==='reports') loadReports();
+}
+// —— 錯誤回報 ——
+const REPORT_KIND = {run_failed:'萃取失敗', server_exception:'伺服器錯誤', frontend_error:'網頁錯誤',
+                     provider_failed:'AI 供應商失敗', user_report:'使用者回報'};
+let reportsCache = [], relatedReport = '';
+async function openReport(related){
+  relatedReport = related || '';
+  await openSettings(); setTab('reports');
+  document.getElementById('rp_msg').textContent = relatedReport ? `會一併附上錯誤編號 ${relatedReport}。` : '';
+  document.getElementById('rp_note').focus();
+}
+async function loadReports(){
+  const r = await api('/reports'); if(!r) return;
+  const d = await r.json(); reportsCache = d.reports;
+  document.getElementById('rp_count').textContent = d.reports.length;
+  document.getElementById('rp_ver').textContent = '目前版本：' + d.version;
+  document.getElementById('rp_list').innerHTML = d.reports.length
+    ? d.reports.map((x,i)=>`<div class="rp-item">
+        <div class="rp-meta">${hx(x.time.replace('T',' ').slice(0,16))} · ${hx(REPORT_KIND[x.kind]||x.kind)} · ${hx(x.id)}</div>
+        <div class="rp-msg">${hx(x.user_note || x.message)}</div>
+        <button class="text" onclick="copyReport(${i}, this)">複製給開發者</button></div>`).join('')
+    : '<div class="hint" style="padding:.8rem 0">目前沒有錯誤紀錄。</div>';
+}
+async function copyReport(i, btn){
+  const text = 'brand-digest 錯誤報告\n```json\n' + JSON.stringify(reportsCache[i], null, 2) + '\n```';
+  try { await navigator.clipboard.writeText(text); btn.textContent = '已複製'; }
+  catch(e){ btn.textContent = '複製失敗，請改用「下載全部報告」'; }
+  setTimeout(()=>{ btn.textContent = '複製給開發者'; }, 2000);
+}
+async function sendReport(){
+  const box = document.getElementById('rp_note'), msg = document.getElementById('rp_msg'), note = box.value.trim();
+  if(!note){ msg.textContent = '請先描述發生了什麼事，再送出。'; box.focus(); return; }
+  msg.textContent = '送出中…';
+  const r = await postJSON('/report', {source:'user', user_note:note, related_report:relatedReport,
+    attach_log:document.getElementById('rp_log').checked, context:{view: current || 'home'}});
+  if(r.ok){ msg.textContent = `已送出，編號 ${r.id}。謝謝你的回報。`; box.value=''; relatedReport=''; loadReports(); }
+  else msg.textContent = r.error || '送出失敗，請稍後再試。';
 }
 async function openSettings(){
   const s = await (await fetch('/settings')).json();
@@ -1507,6 +1639,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(_onboard_status())
         elif url.path == "/settings":
             self._json(_get_settings())
+        elif url.path == "/reports":
+            self._json({"version": reporting.version(), "reports": reporting.list_reports(50)})
+        elif url.path == "/reports/export":
+            data = reporting.export_text().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="brand-digest-error-reports-{time.strftime("%Y%m%d")}.jsonl"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
         elif url.path == "/list_models":
             self._json(_list_models(parse_qs(url.query).get("provider", [""])[0]))
         elif url.path == "/history":
@@ -1526,7 +1669,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send("not found", "text/plain; charset=utf-8", 404)
 
     def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError("body 必須是 JSON 物件")
+        except (ValueError, UnicodeDecodeError):
+            return self._json({"error": "請求格式錯誤（不是有效的 JSON）"}, 400)
+        if self.path == "/report":
+            return self._json(_report_from_client(body))
         if self.path == "/save_keys":  # 舊精靈用（groq/gemini）
             return self._json(_save_settings({"keys": body, "provider": "groq" if body.get("groq") else "gemini"}))
         if self.path == "/save_settings":
@@ -1580,7 +1730,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             skip_fetch = bool(body.get("skip_fetch"))
             if skip_fetch and creator and not (ROOT / "raw" / creator).is_dir():
                 return self._json({"error": f"「{creator}」還沒有抓過任何貼文。請取消勾選「不重抓」，再開始萃取。"}, 400)
-            _state.update(running=True, log=[], creator=creator, ok=None, error="")
+            _state.update(running=True, log=[], creator=creator, ok=None, error="", report_id="")
+            _run_args.clear()
+            _run_args.update(urls=urls, limit=int(body.get("limit", 10)), skip_fetch=skip_fetch)
         threading.Thread(
             target=_run,
             args=(urls, int(body.get("limit", 10)), skip_fetch),
@@ -1599,11 +1751,15 @@ class _Server(http.server.ThreadingHTTPServer):
     allow_reuse_address = sys.platform != "win32"
 
     def handle_error(self, request, client_address):
-        # 單一請求出錯只記 log，絕不讓整個伺服器倒掉
+        # 單一請求出錯只記錄，絕不讓整個伺服器倒掉
         import traceback
-        (ROOT / ".cache").mkdir(exist_ok=True)
-        with open(ROOT / ".cache" / "web_error.log", "a", encoding="utf-8") as f:
-            f.write(f"\n[{client_address}]\n{traceback.format_exc()}")
+        exc = sys.exc_info()[1]
+        # 瀏覽器關分頁、重新整理時連線被中斷是正常現象，不是 bug，不記
+        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError)):
+            return
+        tb = traceback.format_exc()
+        reporting.record("server", "server_exception", f"{type(exc).__name__}: {exc}", detail=tb,
+                         dedupe_key=f"server:{type(exc).__name__}:{tb.splitlines()[-2] if len(tb.splitlines()) > 1 else ''}")
 
 
 def serve():

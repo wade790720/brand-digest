@@ -20,6 +20,7 @@ PyInstaller.__main__.run([
     "--clean",
     # 這些是被「函式內延遲匯入」的，明確列為 hidden import 保證打包進去
     "--hidden-import", "web",
+    "--hidden-import", "reporting",
     "--hidden-import", "go",
     "--hidden-import", "pipeline",
     "--hidden-import", "pipeline.run",
