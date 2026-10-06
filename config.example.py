@@ -4,7 +4,7 @@
 # LLM 供應商："gemini"（預設，中文品質好）或 "groq"（備援，快）
 LLM_PROVIDER = "gemini"
 GEMINI_MODEL = "gemini-2.5-flash"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "openai/gpt-oss-120b"
 
 # 轉錄後端："local"（本機 GPU Whisper，免費無限，需顯卡＋ffmpeg）
 #           "groq"（Groq 雲端 Whisper，不需顯卡/ffmpeg，直接吃影片檔）

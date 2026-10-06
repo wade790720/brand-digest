@@ -23,9 +23,17 @@ def _retry_delay(err: Exception) -> float | None:
     return float(m.group(1)) if m else None
 
 
+def _is_too_large(err: Exception) -> bool:
+    """這次送的內容超過模型每分鐘上限（Groq 413）。重送同樣內容永遠不會過，不要重試。"""
+    s = str(err).lower()
+    return "413" in s or "request too large" in s
+
+
 def _is_retryable(err: Exception) -> bool:
     # 429/quota=免費額度；503/UNAVAILABLE/overloaded=伺服器暫時過載，兩者都值得退避重試
     text = str(err).lower()
+    if _is_too_large(err):
+        return False
     return any(s in text for s in (
         "429", "quota", "rate", "resource_exhausted",
         "503", "unavailable", "overloaded", "high demand",
@@ -148,10 +156,13 @@ def _short_reason(err: Exception) -> str:
     """把供應商的錯誤翻成一句看得懂的原因，給使用者看。"""
     s = str(err)
     low = s.lower()
-    if "credit balance" in low or "billing" in low or "insufficient_quota" in low:
-        return "帳戶額度不足，請到該供應商後台儲值"
+    # 順序要緊：Groq 413 和 Gemini 429 的訊息裡都有 billing 字樣，先判斷它們，才不會誤報成「額度不足」
+    if _is_too_large(err):
+        return "這次送出的內容太長，超過這個模型每分鐘的上限，請改用其他模型或供應商"
     if _is_daily_quota(err):
         return "今天的免費額度已用完"
+    if "credit balance" in low or "insufficient_quota" in low:
+        return "帳戶額度不足，請到該供應商後台儲值"
     if "429" in s or "rate limit" in low or "resource_exhausted" in low:
         return "請求太頻繁，被限流"
     if "401" in s or "authentication" in low or "invalid api key" in low or "invalid x-api-key" in low:

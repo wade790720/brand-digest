@@ -41,7 +41,7 @@ def _cfg(name, default):
 
 LLM_PROVIDER = _cfg("LLM_PROVIDER", "gemini")
 GEMINI_MODEL = _cfg("GEMINI_MODEL", "gemini-2.5-flash")
-GROQ_MODEL = _cfg("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = _cfg("GROQ_MODEL", "openai/gpt-oss-120b")
 OPENAI_MODEL = _cfg("OPENAI_MODEL", "gpt-4o-mini")
 ANTHROPIC_MODEL = _cfg("ANTHROPIC_MODEL", "claude-opus-5-5")
 # 轉錄後端：打包成 exe（frozen）預設用 Groq 雲端（免顯卡/ffmpeg）；開發機預設本機 GPU

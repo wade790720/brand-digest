@@ -1021,7 +1021,7 @@ PAGE = r"""<!doctype html><html lang="zh-Hant"><meta charset="utf-8">
 <script>
 const PROVS = [
   {id:'groq', name:'Groq', ph:'gsk_...', link:'https://console.groq.com/keys', note:'免費日限寬鬆又快',
-   models:['llama-3.3-70b-versatile','llama-3.1-8b-instant','openai/gpt-oss-120b','moonshotai/kimi-k2-instruct']},
+   models:['openai/gpt-oss-120b','openai/gpt-oss-20b','qwen/qwen3.8-27b']},
   {id:'gemini', name:'Gemini', ph:'AIza...', link:'https://aistudio.google.com/apikey', note:'中文品質好',
    models:['gemini-2.5-flash','gemini-2.5-pro','gemini-2.0-flash']},
   {id:'openai', name:'OpenAI (ChatGPT)', ph:'sk-...', link:'https://platform.openai.com/api-keys', note:'gpt-4o 等',
