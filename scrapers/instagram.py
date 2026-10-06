@@ -119,6 +119,8 @@ def _make_loader() -> instaloader.Instaloader:
         dirname_pattern=str(ROOT / "raw" / "{target}"),
         filename_pattern="{date_utc:%Y%m%d}_{shortcode}",
         quiet=True,
+        # 預設失敗會自動重試 3 次。IG 已經回「請稍候」時再重試只會加深限制，所以不重試，交給冷卻機制
+        max_connection_attempts=1,
     )
 
 
