@@ -368,7 +368,7 @@ def _delete_creator(name: str) -> dict:
     if not name:
         return {"error": "名稱不合法"}
     (ROOT / "output" / f"{name}.md").unlink(missing_ok=True)
-    for d in (ROOT / ".cache" / name, ROOT / "raw" / name):
+    for d in (ROOT / ".cache" / name, ROOT / "raw" / name, ROOT / "output" / name):
         if d.is_dir():
             shutil.rmtree(d, ignore_errors=True)
     _archive_creator(name, False)              # 從封存清單也移掉
@@ -471,6 +471,18 @@ def _failure_reason(log: list[str]) -> str:
         if s and "it/s" not in s and "%|" not in s and not s.startswith("（"):
             return s[:300]
     return "執行失敗，但沒有留下錯誤訊息。"
+
+
+def _docs(creator: str) -> list[dict]:
+    """一位博主的所有篇：主知識庫＋ output/<博主>/ 底下的其他篇（例如理論對位版），新的在後。
+    檔名「理論對位-直播銷售轉換」顯示成「理論對位：直播銷售轉換」。"""
+    creator = Path(creator).name
+    docs = [{"id": "", "title": "主題整理"}]
+    folder = ROOT / "output" / creator
+    if creator and folder.is_dir():
+        for f in sorted(folder.glob("*.md"), key=lambda p: p.stat().st_mtime):
+            docs.append({"id": f.stem, "title": f.stem.replace("-", "：", 1)})
+    return docs
 
 
 def _latest_output_since(started: float) -> str:
@@ -651,6 +663,7 @@ PAGE = r"""<!doctype html><html lang="zh-Hant"><meta charset="utf-8">
   .chips{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.9rem}
   .chip{height:2rem;border-radius:var(--r-sm);background:transparent;color:var(--on-surface);
     box-shadow:inset 0 0 0 1px var(--outline-variant);padding:0 1rem;font-size:.8125rem}
+  .chip.on{background:var(--secondary-container);color:var(--on-secondary-container);box-shadow:none}
   #kb{line-height:1.6;font-size:1rem;color:var(--on-surface)}
   #kb h1{font-size:1.75rem;line-height:2.25rem;font-weight:400;margin:.5rem 0 1rem;padding-bottom:.75rem;border-bottom:1px solid var(--outline-variant)}
   #kb h2{font-size:1.375rem;line-height:1.75rem;font-weight:400;margin-top:2rem;color:var(--on-surface)}
@@ -885,6 +898,7 @@ PAGE = r"""<!doctype html><html lang="zh-Hant"><meta charset="utf-8">
       <div id="records"></div>
     </details>
 
+    <div id="docs" class="chips" role="tablist" aria-label="這位博主的知識庫篇目" style="display:none;margin-top:1.25rem"></div>
     <div id="kb" style="margin-top:1.25rem"></div>
   </div>
 
@@ -1126,7 +1140,37 @@ async function showOutput(name){
     document.querySelectorAll('.hist').forEach(e=>e.classList.toggle('active', e.dataset.name===name));
     document.getElementById('main').scrollTop = 0;
     renderRecords(name);
+    loadDocs(name);
   }
+}
+// 同一位博主可以有多篇（主題整理、理論對位…）：上方一排篇目，點了切換，不會覆蓋彼此
+async function loadDocs(name){
+  const box = document.getElementById('docs');
+  box.style.display = 'none';
+  const r = await api('/docs?creator=' + encodeURIComponent(name));
+  if (!r || current !== name) return;
+  const docs = await r.json();
+  box.replaceChildren(...docs.map((d, i) => {
+    const b = document.createElement('button');
+    b.className = 'chip' + (i === 0 ? ' on' : '');
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-selected', i === 0);
+    b.textContent = d.title;
+    b.onclick = () => showDoc(name, d.id, b);
+    return b;
+  }));
+  if (docs.length > 1) box.style.display = 'flex';
+}
+async function showDoc(name, doc, btn){
+  const my = ++navSeq;
+  const r = await api(`/output?creator=${encodeURIComponent(name)}&doc=${encodeURIComponent(doc)}`);
+  if (!r || !r.ok || my !== navSeq) return;
+  const kb = document.getElementById('kb');
+  kb.innerHTML = md2html(await r.text());
+  accordionize(kb, '來源索引');
+  document.querySelectorAll('#docs .chip').forEach(c => {
+    c.classList.toggle('on', c === btn); c.setAttribute('aria-selected', c === btn);
+  });
 }
 function switchTab(which){
   const kb = which==='kb';
@@ -1472,6 +1516,7 @@ function goHome(){
   document.getElementById('tabs').style.display = 'none';
   document.getElementById('askpanel').style.display = 'none';
   document.getElementById('recbox').style.display = 'none';
+  document.getElementById('docs').style.display = 'none';
   document.getElementById('netwrap').style.display = 'none';
   document.getElementById('kbview').style.display = 'block';
   document.getElementById('kb').innerHTML = '';
@@ -1672,9 +1717,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(_records(parse_qs(url.query).get("creator", [""])[0]))
         elif url.path == "/network":
             self._json(_network(parse_qs(url.query).get("creator", [""])[0]))
+        elif url.path == "/docs":
+            self._json(_docs(parse_qs(url.query).get("creator", [""])[0]))
         elif url.path == "/output":
-            creator = parse_qs(url.query).get("creator", [""])[0]
-            f = ROOT / "output" / f"{Path(creator).name}.md"  # Path().name 擋路徑跳脫
+            q = parse_qs(url.query)
+            creator = Path(q.get("creator", [""])[0]).name   # Path().name 擋路徑跳脫
+            doc = Path(q.get("doc", [""])[0]).name
+            f = ROOT / "output" / (f"{creator}/{doc}.md" if doc else f"{creator}.md")
             if f.exists():
                 self._send(f.read_text(encoding="utf-8"), "text/plain; charset=utf-8")
             else:

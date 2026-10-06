@@ -110,7 +110,7 @@ def _md(raw: str, sub_level: bool = False) -> str:
         md = md.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     # LLM 常把出處寫成碎片id（[3-2] 或表格裡的 3‑2），改回則編號 [3]，網頁才點得到來源
     md = re.sub(r"\[(\d+)[-‑–]\d+\]", r"[\1]", md)
-    md = re.sub(r"(?<![\[\d.])(\d{1,3})[-‑–]\d{1,2}(?=[：:，、）)\s])", r"[\1]", md)
+    md = re.sub(r"(?<![\[\d.\-‑–])(\d{1,3})[-‑–]\d{1,2}(?=[：:，、）)\s])", r"[\1]", md)
     if sub_level:  # 理論小節裡，第一行以外的標題（子原則）一律降成 ####
         lines = md.split("\n")
         md = "\n".join([lines[0]] + [re.sub(r"^#{1,4}\s+\**(.+?)\**\s*$", r"#### \1", ln) for ln in lines[1:]])
@@ -217,6 +217,8 @@ if __name__ == "__main__":
     ap.add_argument("creator")
     ap.add_argument("--topic", default="直播銷售轉換")
     args = ap.parse_args()
-    out = settings.ROOT / "output" / f"{args.creator}.theory.md"
+    # 收在博主底下當「另一篇」，不覆蓋主知識庫；網頁的篇目列會列出它
+    out = settings.ROOT / "output" / args.creator / f"理論對位-{args.topic}.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(build(args.creator, args.topic), encoding="utf-8")
     print(f"完成：{out}")
