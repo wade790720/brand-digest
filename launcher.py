@@ -38,9 +38,15 @@ def _server():
 if __name__ == "__main__":
     import multiprocessing
     multiprocessing.freeze_support()          # PyInstaller 多行程保險
-    worker = len(sys.argv) > 1 and sys.argv[1] == "--pipeline"
+    mode = sys.argv[1] if len(sys.argv) > 1 else ""
+    worker = mode in ("--pipeline", "--theory")
     try:
-        _worker() if worker else _server()
+        if mode == "--theory":
+            _theory()
+        elif worker:
+            _worker()
+        else:
+            _server()
     except (SystemExit, KeyboardInterrupt):
         raise                                   # 正常結束與使用者按 Ctrl+C 不是錯誤
     except Exception as err:
@@ -48,5 +54,5 @@ if __name__ == "__main__":
         import traceback
         import reporting
         reporting.record("launcher", "crash", f"{type(err).__name__}: {err}", detail=traceback.format_exc(),
-                         context={"mode": "pipeline" if worker else "server"})
+                         context={"mode": mode.lstrip("-") or "server"})
         raise

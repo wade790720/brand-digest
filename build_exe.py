@@ -27,6 +27,7 @@ PyInstaller.__main__.run([
     "--hidden-import", "pipeline.llm",
     "--hidden-import", "pipeline.digest",
     "--hidden-import", "pipeline.aggregate",
+    "--hidden-import", "pipeline.theory",
     "--hidden-import", "pipeline.settings",
     "--hidden-import", "pipeline.transcribe",
     "--hidden-import", "pipeline.extract_audio",

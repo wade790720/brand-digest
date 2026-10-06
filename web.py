@@ -25,7 +25,8 @@ PORT = 8765
 # 同時只允許一個任務（轉錄吃滿 GPU，跑兩個只會更慢）
 _lock = threading.Lock()
 # ok：None＝還沒跑完、True＝成功、False＝失敗（error 是給使用者看的原因，report_id 是自動記錄的錯誤報告編號）
-_state = {"running": False, "log": [], "creator": "", "ok": None, "error": "", "report_id": ""}
+# doc：任務產生的篇目 id（理論對位版）；空字串＝主知識庫
+_state = {"running": False, "log": [], "creator": "", "ok": None, "error": "", "report_id": "", "doc": ""}
 _run_args = {}   # 最近一次任務的參數，失敗時附進錯誤報告
 
 # 2FA 登入要分兩步，第一步的 loader 先留在記憶體等驗證碼
@@ -502,6 +503,77 @@ def _run(urls: list[str], limit: int, skip_fetch: bool):
         cmd = [sys.executable, "-u", "go.py", *urls, "--limit", str(limit)]
     if skip_fetch:
         cmd.append("--skip-fetch")
+    _exec(cmd, started)
+
+
+def _run_theory(creator: str, topic: str):
+    """背景產生理論對位版；成功後 _state["doc"] 指向新的那一篇，網頁會直接打開它。"""
+    from pipeline.theory import doc_id
+    if getattr(sys, "frozen", False):
+        cmd = [sys.executable, "--theory", creator, "--topic", topic]
+    else:
+        cmd = [sys.executable, "-u", "-m", "pipeline.theory", creator, "--topic", topic]
+    _exec(cmd, time.time(), doc=doc_id(topic))
+
+
+def _theory_args(body: dict) -> tuple[str, str, str]:
+    """回傳 (博主, 主題, 錯誤訊息)。博主用 Path().name 擋路徑跳脫。"""
+    from pipeline.theory import safe_topic
+    creator = Path(str(body.get("creator", ""))).name
+    topic = str(body.get("topic", "")).strip()
+    if not topic:
+        return creator, "", "請先輸入你想學的主題，例如「直播銷售轉換」。"
+    if not creator or not (ROOT / ".cache" / creator).is_dir():
+        return creator, "", f"「{creator}」還沒有任何萃取結果，請先萃取幾則貼文。"
+    return creator, safe_topic(topic), ""
+
+
+def _theory_propose(body: dict) -> tuple[dict, int]:
+    """第一步：給使用者確認的理論骨架（純文字）。這個主題做過，就拿上次確認的版本，除非 fresh。"""
+    from pipeline import theory
+    creator, topic, err = _theory_args(body)
+    if err:
+        return {"error": err}, 400
+    saved = None if body.get("fresh") else theory.load_skeleton(creator, topic)
+    if saved:
+        return {"text": theory.skeleton_to_text(saved), "saved": True}, 200
+    try:
+        skeleton = theory.propose_skeleton(creator, topic)
+    except ValueError as e:
+        return {"error": str(e)}, 400
+    except Exception as e:             # 所有 AI 供應商都失敗
+        from pipeline.llm import _short_reason
+        return {"error": f"AI 沒有回應：{_short_reason(e)}。請稍後再試，或到設定換一個模型。"}, 502
+    return {"text": theory.skeleton_to_text(skeleton), "saved": False}, 200
+
+
+def _theory_start(body: dict) -> tuple[dict, int]:
+    """第二步：存下使用者確認的骨架，在背景產生理論對位版。"""
+    from pipeline import theory
+    creator, topic, err = _theory_args(body)
+    if err:
+        return {"error": err}, 400
+    try:
+        skeleton = theory.text_to_skeleton(str(body.get("skeleton", "")))
+    except ValueError as e:
+        return {"error": str(e)}, 400
+    with _lock:
+        if _state["running"]:
+            return {"error": "已有任務在跑，等它完成"}, 409
+        old = theory.load_skeleton(creator, topic)
+        # 用文字比對：骨架沒改就保留上次的對位結果，省一次 AI 呼叫
+        if old is None or theory.skeleton_to_text(old) != theory.skeleton_to_text(skeleton):
+            theory.save_skeleton(creator, topic, skeleton)
+        _state.update(running=True, log=[], creator=creator, ok=None, error="", report_id="", doc="")
+        _run_args.clear()
+        _run_args.update(task="theory", creator=creator, topic=topic)
+    threading.Thread(target=_run_theory, args=(creator, topic), daemon=True).start()
+    return {"ok": True}, 200
+
+
+def _exec(cmd: list[str], started: float, doc: str = ""):
+    """跑一個子程序任務：即時收集輸出到 _state["log"]，結束時記錄成功或失敗（失敗會產生錯誤報告）。
+    doc：成功後要打開的篇目；必須在 running=False 之前寫入，網頁輪詢才不會先看到結束、打開錯的篇。"""
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
     try:
         proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -517,7 +589,7 @@ def _run(urls: list[str], limit: int, skip_fetch: bool):
     if code == 0:
         if not _state["creator"]:
             _state["creator"] = _latest_output_since(started)
-        _state.update(ok=True, error="", report_id="")
+        _state.update(ok=True, error="", report_id="", doc=doc)
         _state["log"].append("（完成）")
     else:
         reason = _failure_reason(_state["log"])
@@ -899,6 +971,28 @@ PAGE = r"""<!doctype html><html lang="zh-Hant"><meta charset="utf-8">
     </details>
 
     <div id="docs" class="chips" role="tablist" aria-label="這位博主的知識庫篇目" style="display:none;margin-top:1.25rem"></div>
+    <div id="theorypanel" class="card urlbar" style="display:none;margin-top:1rem">
+      <div class="title-m">產生理論對位版</div>
+      <div class="hint" style="margin:.35rem 0 1rem">把她零碎的經驗對位到既有理論，整理成可以照著做的公式。會多一篇，不會覆蓋原本的知識庫。</div>
+      <label for="thtopic" class="hint">你想從這位博主學什麼？</label>
+      <input id="thtopic" style="width:100%;margin-top:.4rem" placeholder="例如：直播銷售轉換、主播培養、短影音腳本"
+             onkeydown="if(event.key==='Enter') proposeTheory(false)">
+      <div class="ctl">
+        <button class="primary" id="thpropose" onclick="proposeTheory(false)">請 AI 提出理論骨架</button>
+        <button class="text" onclick="closeTheory()">取消</button>
+      </div>
+      <div id="thstep2" style="display:none;margin-top:1.25rem">
+        <div class="title-m" style="font-size:.9375rem">確認理論骨架</div>
+        <div class="hint" style="margin:.35rem 0 .6rem">AI 依你的主題挑了下面這些理論。刪掉不相關的，補上漏掉的，再按開始。<br>
+          格式：一行寫「理論名稱｜出處」，底下每行寫「- 子原則」，理論之間空一行。<span id="thsaved"></span></div>
+        <textarea id="thsk" rows="14" spellcheck="false" style="width:100%;font-size:.875rem;line-height:1.6"></textarea>
+        <div class="ctl">
+          <button class="primary" id="thrun" onclick="runTheory()">開始產生（約 2–5 分鐘）</button>
+          <button class="ghost" onclick="proposeTheory(true)">請 AI 重新提出</button>
+        </div>
+      </div>
+      <div id="therr" role="alert" style="display:none;margin-top:.9rem;color:var(--error);font-size:.875rem"></div>
+    </div>
     <div id="kb" style="margin-top:1.25rem"></div>
   </div>
 
@@ -1112,7 +1206,7 @@ function startReconnect(){
   setTimeout(tick, 2000);
 }
 let navSeq = 0;   // 每次換頁 +1；較早的換頁請求晚回來時直接丟掉，避免蓋掉使用者後來點的頁
-async function showOutput(name){
+async function showOutput(name, doc){
   const my = ++navSeq;
   const r = await api('/output?creator=' + encodeURIComponent(name));
   if(!r || my !== navSeq) return;
@@ -1140,26 +1234,78 @@ async function showOutput(name){
     document.querySelectorAll('.hist').forEach(e=>e.classList.toggle('active', e.dataset.name===name));
     document.getElementById('main').scrollTop = 0;
     renderRecords(name);
-    loadDocs(name);
+    loadDocs(name, doc);
   }
 }
 // 同一位博主可以有多篇（主題整理、理論對位…）：上方一排篇目，點了切換，不會覆蓋彼此
-async function loadDocs(name){
+// open：載入後直接打開這一篇（剛產生完的理論對位版）
+async function loadDocs(name, open){
   const box = document.getElementById('docs');
   box.style.display = 'none';
+  closeTheory();
   const r = await api('/docs?creator=' + encodeURIComponent(name));
   if (!r || current !== name) return;
   const docs = await r.json();
-  box.replaceChildren(...docs.map((d, i) => {
+  const chips = docs.map((d, i) => {
     const b = document.createElement('button');
     b.className = 'chip' + (i === 0 ? ' on' : '');
     b.setAttribute('role', 'tab');
     b.setAttribute('aria-selected', i === 0);
     b.textContent = d.title;
     b.onclick = () => showDoc(name, d.id, b);
+    if (open && d.id === open) setTimeout(() => b.click());
     return b;
-  }));
-  if (docs.length > 1) box.style.display = 'flex';
+  });
+  const add = document.createElement('button');
+  add.className = 'chip';
+  add.textContent = '＋ 理論對位';
+  add.title = '把她的經驗對位到既有理論，產生新的一篇';
+  add.onclick = openTheory;
+  box.replaceChildren(...chips, add);
+  box.style.display = 'flex';
+}
+// —— 產生理論對位版：①輸入主題 → ②AI 提骨架、使用者確認 → ③背景產生，完成後打開新篇 ——
+function theoryErr(msg){
+  const e = document.getElementById('therr');
+  e.textContent = msg || ''; e.style.display = msg ? 'block' : 'none';
+}
+function openTheory(){
+  document.getElementById('theorypanel').style.display = 'block';
+  document.getElementById('thstep2').style.display = 'none';
+  theoryErr('');
+  document.getElementById('thtopic').focus();
+}
+function closeTheory(){ document.getElementById('theorypanel').style.display = 'none'; }
+async function proposeTheory(fresh){
+  const topic = document.getElementById('thtopic').value.trim();
+  if (!topic) { theoryErr('請先輸入你想學的主題。'); return; }
+  const b = document.getElementById('thpropose');
+  if (b.disabled) return;
+  theoryErr(''); b.disabled = true; b.textContent = '⏳ AI 思考中（約 20 秒）…';
+  const r = await api('/theory/propose', {method:'POST', body: JSON.stringify({creator: current, topic, fresh})});
+  b.disabled = false; b.textContent = '請 AI 提出理論骨架';
+  if (!r) { theoryErr('連不上前台伺服器，請確認程式還開著。'); return; }
+  const j = await r.json();
+  if (!r.ok) { theoryErr(j.error || '無法產生理論骨架。'); return; }
+  document.getElementById('thsk').value = j.text;
+  document.getElementById('thsaved').textContent = j.saved ? '（這是你上次確認過的版本）' : '';
+  document.getElementById('thstep2').style.display = 'block';
+}
+async function runTheory(){
+  const b = document.getElementById('thrun');
+  if (b.disabled) return;
+  theoryErr(''); b.disabled = true;
+  const r = await api('/theory/run', {method:'POST', body: JSON.stringify({
+    creator: current, topic: document.getElementById('thtopic').value.trim(),
+    skeleton: document.getElementById('thsk').value})});
+  b.disabled = false;
+  if (!r) { theoryErr('連不上前台伺服器，請確認程式還開著。'); return; }
+  if (!r.ok) { theoryErr((await r.json()).error || '無法開始產生。'); return; }
+  closeTheory();
+  hideRunError();
+  document.getElementById('logbox').open = true;   // 跑 2–5 分鐘，讓使用者看得到進度
+  watching = true;
+  poll();
 }
 async function showDoc(name, doc, btn){
   const my = ++navSeq;
@@ -1251,8 +1397,9 @@ async function deleteCreator(e, name){
 function setBtn(loading){
   const b = document.getElementById('btn'), c = document.getElementById('btnc');
   b.disabled = c.disabled = loading;
-  b.textContent = loading ? '⏳ 萃取中…' : '開始萃取';
-  c.textContent = loading ? '⏳ 萃取中…' : '萃取下一批';
+  b.textContent = loading ? '⏳ 執行中…' : '開始萃取';
+  c.textContent = loading ? '⏳ 執行中…' : '萃取下一批';
+  const t = document.getElementById('thrun'); if (t) t.disabled = loading;   // 一次只跑一個任務
 }
 // 博主檢視的「萃取下一批」：用他的主頁網址走原本的 start()
 function startCreator(){
@@ -1310,7 +1457,7 @@ async function poll(){
   document.getElementById('skipfetch').checked = false;
   // 失敗：留在原畫面顯示原因，絕不改顯示別的博主（舊版會退回清單第一個，看起來像「跳回去」）
   if (s.ok === false) { showRunError(s.error, s.report_id); document.getElementById('logbox').open = true; return; }
-  if (s.ok && s.creator) showOutput(s.creator);
+  if (s.ok && s.creator) showOutput(s.creator, s.doc);
 }
 async function refreshLogin(){
   const lr = await api('/login_status'); if(!lr) return;
@@ -1517,6 +1664,7 @@ function goHome(){
   document.getElementById('askpanel').style.display = 'none';
   document.getElementById('recbox').style.display = 'none';
   document.getElementById('docs').style.display = 'none';
+  closeTheory();
   document.getElementById('netwrap').style.display = 'none';
   document.getElementById('kbview').style.display = 'block';
   document.getElementById('kb').innerHTML = '';
@@ -1738,6 +1886,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 raise ValueError("body 必須是 JSON 物件")
         except (ValueError, UnicodeDecodeError):
             return self._json({"error": "請求格式錯誤（不是有效的 JSON）"}, 400)
+        if self.path == "/theory/propose":
+            return self._json(*_theory_propose(body))
+        if self.path == "/theory/run":
+            return self._json(*_theory_start(body))
         if self.path == "/report":
             return self._json(_report_from_client(body))
         if self.path == "/save_keys":  # 舊精靈用（groq/gemini）
@@ -1799,7 +1951,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 left = backoff_remaining()
                 if left > 0:
                     return self._json({"error": _backoff_message(left)}, 400)
-            _state.update(running=True, log=[], creator=creator, ok=None, error="", report_id="")
+            _state.update(running=True, log=[], creator=creator, ok=None, error="", report_id="", doc="")
             _run_args.clear()
             _run_args.update(urls=urls, limit=int(body.get("limit", 10)), skip_fetch=skip_fetch)
         threading.Thread(

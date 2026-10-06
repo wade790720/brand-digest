@@ -95,13 +95,81 @@ def _fragments(kept: list[dict]) -> dict[str, str]:
             for j, g in enumerate(d.get("乾貨") or [], 1)}
 
 
-def _cached_json(path, make):
-    """有存檔就用存檔（使用者可以手動改骨架再重跑），沒有才呼叫 LLM。"""
-    if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
-    data = make()
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    return data
+def safe_topic(topic: str) -> str:
+    """主題會變成檔名：去掉 Windows 不允許的字元，限制長度。"""
+    return re.sub(r'[\\/:*?"<>|\s]+', " ", topic or "").strip()[:30] or "未命名主題"
+
+
+def doc_id(topic: str) -> str:
+    """篇目 id＝檔名（不含 .md）；網頁顯示時把第一個「-」換成「：」。"""
+    return f"理論對位-{safe_topic(topic)}"
+
+
+def doc_path(creator: str, topic: str):
+    return settings.ROOT / "output" / creator / f"{doc_id(topic)}.md"
+
+
+def _dir(creator: str, topic: str):
+    """每個主題各自的骨架與對位快取，不同主題互不覆蓋。"""
+    return settings.CACHE_DIR / creator / "theory" / safe_topic(topic)
+
+
+def _kept(creator: str) -> list[dict]:
+    digests = load_all_digests(creator)
+    return [d for d in digests if d.get("含金量") != "低"] or digests
+
+
+def propose_skeleton(creator: str, topic: str) -> list:
+    """請 AI 依主題提出理論骨架。不存檔：要等使用者確認或修改後，用 save_skeleton 存。"""
+    kept = _kept(creator)
+    if not kept:
+        raise ValueError(f"「{creator}」還沒有任何萃取結果，請先萃取幾則貼文。")
+    return _parse_list(llm.generate(SKELETON_SYSTEM, SKELETON_USER.format(
+        topic=topic, topics="\n".join(f"- {d.get('主題', '')}" for d in kept))))
+
+
+def load_skeleton(creator: str, topic: str) -> list | None:
+    f = _dir(creator, topic) / "skeleton.json"
+    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
+
+
+def save_skeleton(creator: str, topic: str, skeleton: list):
+    """存骨架；骨架變了，舊的對位結果就不能用，一併刪掉。"""
+    d = _dir(creator, topic)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "skeleton.json").write_text(json.dumps(skeleton, ensure_ascii=False, indent=2), encoding="utf-8")
+    (d / "map.json").unlink(missing_ok=True)
+
+
+def skeleton_to_text(skeleton: list) -> str:
+    """給使用者編輯的純文字格式：一行理論「名稱｜出處」，底下每行「- 子原則」，理論之間空一行。"""
+    blocks = []
+    for t in skeleton:
+        head = t.get("理論", "") + (f"｜{t['出處']}" if t.get("出處") else "")
+        blocks.append("\n".join([head] + [f"- {p.get('名稱', '')}" for p in t.get("原則", [])]))
+    return "\n\n".join(blocks)
+
+
+def text_to_skeleton(text: str) -> list:
+    """skeleton_to_text 的反向。id 依順序重新編（T1、T1.1…），使用者不用管 id。
+    沒列子原則的理論，用理論本身當唯一的子原則，才有地方對位。"""
+    theories = []
+    for line in (ln.strip() for ln in text.splitlines()):
+        if not line:
+            continue
+        if line[0] in "-–•*":
+            name = line.lstrip("-–•* ").strip()
+            if name and theories:
+                theories[-1]["原則"].append({"名稱": name})
+        else:
+            name, _, source = line.partition("｜")
+            theories.append({"理論": name.strip(), "出處": source.strip(), "原則": []})
+    if not theories:
+        raise ValueError("理論骨架是空的，至少要有一個理論。")
+    for i, t in enumerate(theories, 1):
+        t["id"] = f"T{i}"
+        t["原則"] = [{"id": f"T{i}.{j}", **p} for j, p in enumerate(t["原則"] or [{"名稱": t["理論"]}], 1)]
+    return theories
 
 
 def _md(raw: str, sub_level: bool = False) -> str:
@@ -127,6 +195,27 @@ def _parse_list(raw: str) -> list:
     if not isinstance(data, list) or not data:
         raise ValueError("理論骨架格式不對：" + raw[:200])
     return data
+
+
+MAP_BATCH = 60   # 每批碎片數：約 3–4k token，免費方案（Groq 每分鐘 8000 token）也送得出去
+
+
+def _map_in_batches(skeleton: list, items: list[tuple[str, str]]) -> dict:
+    """碎片分批對位再合併。一次全送，碎片多的博主會超過模型上限；分批送內容少，判斷也比較準。
+    ponytail: 不同批次可能各自產生意思相近的「獨門」群組，目前不合併；飽和度會因此略偏高。"""
+    sk = json.dumps(skeleton, ensure_ascii=False, indent=1)
+    merged = {"對位": {}, "獨門": [], "矛盾": []}
+    for i in range(0, len(items), MAP_BATCH):
+        part = items[i:i + MAP_BATCH]
+        print(f"  對位：第 {i + 1}–{i + len(part)} 條（共 {len(items)} 條碎片）…")
+        m = _parse_json(llm.generate(MAP_SYSTEM, MAP_USER.format(
+            skeleton=sk, fragments="\n".join(f"{k}：{v}" for k, v in part))))
+        for node, ids in (m.get("對位") or {}).items():
+            if isinstance(ids, list):
+                merged["對位"].setdefault(node, []).extend(ids)
+        merged["獨門"] += [g for g in m.get("獨門") or [] if isinstance(g, dict)]
+        merged["矛盾"] += [c for c in m.get("矛盾") or [] if isinstance(c, dict)]
+    return merged
 
 
 def saturation(kept: list[dict], mapping: dict) -> list[int]:
@@ -156,18 +245,24 @@ def _saturation_note(curve: list[int]) -> str:
 
 
 def build(creator: str, topic: str) -> str:
-    digests = load_all_digests(creator)
-    kept = [d for d in digests if d.get("含金量") != "低"] or digests
-    cache = settings.CACHE_DIR / creator
+    kept = _kept(creator)
+    if not kept:
+        raise ValueError(f"「{creator}」還沒有任何萃取結果，請先萃取幾則貼文。")
     frags = _fragments(kept)
 
-    skeleton = _cached_json(cache / "theory_skeleton.json", lambda: _parse_list(llm.generate(
-        SKELETON_SYSTEM, SKELETON_USER.format(
-            topic=topic, topics="\n".join(f"- {d.get('主題', '')}" for d in kept)))))
-    mapping = _cached_json(cache / "theory_map.json", lambda: _parse_json(llm.generate(
-        MAP_SYSTEM, MAP_USER.format(
-            skeleton=json.dumps(skeleton, ensure_ascii=False, indent=1),
-            fragments="\n".join(f"{k}：{v}" for k, v in frags.items())))))
+    skeleton = load_skeleton(creator, topic)
+    if skeleton is None:              # 命令列直接跑、沒經過網頁確認：用 AI 提的骨架
+        print("  產生理論骨架…")
+        skeleton = propose_skeleton(creator, topic)
+        save_skeleton(creator, topic, skeleton)
+    map_file = _dir(creator, topic) / "map.json"
+    if map_file.exists():
+        mapping = json.loads(map_file.read_text(encoding="utf-8"))
+    else:
+        mapping = _map_in_batches(skeleton, list(frags.items()))
+        if not mapping.get("對位") and not mapping.get("獨門"):
+            raise ValueError("AI 回傳的對位結果是空的或格式不對，請再試一次，或到設定換一個模型。")
+        map_file.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), encoding="utf-8")
 
     names = {p["id"]: f"{p['名稱']}（{t['理論']}）" for t in skeleton for p in t.get("原則", [])}
     # LLM 偶爾會編出骨架沒有的節點 id（例如 T4.5），直接丟掉
@@ -209,16 +304,35 @@ def build(creator: str, topic: str) -> str:
             f"{_saturation_note(saturation(kept, mapping))}\n\n{md}\n{_source_index(kept)}\n")
 
 
-if __name__ == "__main__":
-    # 後處理自我檢查（不打 LLM）
-    assert _md("做法 [2-2][10-3]，見 6‑4：x") == "做法 [2][10]，見 [6]：x"
-    assert _md("### 理論\n## **互惠**\n- a", sub_level=True) == "### 理論\n#### 互惠\n- a"
-    ap = argparse.ArgumentParser(description="理論對位版知識庫（實驗）")
+def main(argv=None):
+    """命令列與 exe（launcher --theory）共用的進入點。"""
+    ap = argparse.ArgumentParser(description="理論對位版知識庫")
     ap.add_argument("creator")
     ap.add_argument("--topic", default="直播銷售轉換")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+    try:
+        md = build(args.creator, args.topic)
+    except ValueError as err:          # 給使用者看的錯誤：一行說清楚，不要 traceback
+        raise SystemExit(str(err))
     # 收在博主底下當「另一篇」，不覆蓋主知識庫；網頁的篇目列會列出它
-    out = settings.ROOT / "output" / args.creator / f"理論對位-{args.topic}.md"
+    out = doc_path(args.creator, args.topic)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(build(args.creator, args.topic), encoding="utf-8")
+    out.write_text(md, encoding="utf-8")
     print(f"完成：{out}")
+
+
+if __name__ == "__main__":
+    import sys
+    if sys.argv[1:] == ["--selftest"]:   # 不打 LLM 的自我檢查
+        assert _md("做法 [2-2][10-3]，見 6‑4：x") == "做法 [2][10]，見 [6]：x"
+        assert _md("### 理論\n## **互惠**\n- a", sub_level=True) == "### 理論\n#### 互惠\n- a"
+        assert _md("Mehrabian's 7-38-55 Rule") == "Mehrabian's 7-38-55 Rule"
+        sk = text_to_skeleton("Cialdini 說服原則｜Robert Cialdini\n- 互惠\n- 稀缺\n\n社會認同\n")
+        assert [t["id"] for t in sk] == ["T1", "T2"] and sk[0]["出處"] == "Robert Cialdini"
+        assert [p["id"] for p in sk[0]["原則"]] == ["T1.1", "T1.2"]
+        assert sk[1]["原則"] == [{"id": "T2.1", "名稱": "社會認同"}]   # 沒列子原則：用理論本身
+        assert text_to_skeleton(skeleton_to_text(sk)) == sk                 # 文字格式來回不失真
+        assert safe_topic('a/b:c*  d') == "a b c d" and safe_topic("  ") == "未命名主題"
+        print("ok")
+    else:
+        main()
