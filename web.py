@@ -849,7 +849,7 @@ PAGE = r"""<!doctype html><html lang="zh-Hant"><meta charset="utf-8">
   <div id="runerr" role="alert" hidden>
     <div class="re-title">這次萃取沒有完成</div>
     <div class="re-msg" id="runerrmsg"></div>
-    <div class="re-hint">展開下方「執行紀錄」可以看完整過程。<span id="runerrid"></span></div>
+    <div class="re-hint" id="runerrhint">展開下方「執行紀錄」可以看完整過程。<span id="runerrid"></span></div>
     <div class="re-actions" id="runerracts" hidden>
       <button class="text re-btn" onclick="openReport(lastReportId)">補充說明這個問題</button>
     </div>
@@ -1097,15 +1097,18 @@ function startReconnect(){
   };
   setTimeout(tick, 2000);
 }
+let navSeq = 0;   // 每次換頁 +1；較早的換頁請求晚回來時直接丟掉，避免蓋掉使用者後來點的頁
 async function showOutput(name){
+  const my = ++navSeq;
   const r = await api('/output?creator=' + encodeURIComponent(name));
-  if(!r) return;
+  if(!r || my !== navSeq) return;
   const kb = document.getElementById('kb');
   if (r.ok){
     hideRunError();
     kb.innerHTML = md2html(await r.text());
     accordionize(kb, '來源索引');   // 來源索引摺疊成 accordion
     current = name;
+    syncLog();
     document.getElementById('askpanel').style.display = 'block';
     document.getElementById('answers').innerHTML = '';
     document.getElementById('tabs').style.display = 'inline-flex';
@@ -1135,6 +1138,7 @@ function switchTab(which){
 }
 async function renderRecords(name){
   const recs = await (await fetch('/records?creator=' + encodeURIComponent(name))).json();
+  if (current !== name) return;   // 載入期間已切到別頁：不要把這位博主的清單蓋到別頁上
   const box = document.getElementById('recbox');
   if(!recs.length){ box.style.display='none'; return; }
   box.style.display = 'block';
@@ -1220,11 +1224,18 @@ function showRunError(msg, reportId){
   document.getElementById('runerrmsg').textContent = msg;
   document.getElementById('runerrid').textContent = lastReportId ? ` 已自動記錄這個錯誤（編號 ${lastReportId}）。` : '';
   document.getElementById('runerracts').hidden = !lastReportId;
+  document.getElementById('runerrhint').hidden = !lastReportId;   // 沒開始跑就被擋下時，沒有執行紀錄可看
   document.getElementById('runerr').hidden = false;
   document.getElementById('runerr').scrollIntoView({block:'nearest'});
 }
 function hideRunError(){ document.getElementById('runerr').hidden = true; }
 let watching = false;   // 這個頁面有在看一個執行中的任務，跑完才需要切換畫面
+let runFor = '';        // 最近一次執行屬於哪個博主；執行紀錄只在首頁和該博主頁顯示
+function syncLog(){
+  const mine = !current || current === runFor;
+  document.getElementById('logbox').style.display = mine ? '' : 'none';
+  if (!mine) hideRunError();
+}
 async function start(){
   const b = document.getElementById('btn');
   if (b.disabled) return;                 // 已在跑，忽略連點
@@ -1246,6 +1257,7 @@ async function poll(){
   const s = await r.json();
   const pre = document.getElementById('log');
   pre.textContent = s.log.join('\n') || '啟動中…'; pre.scrollTop = pre.scrollHeight;
+  runFor = s.creator || ''; syncLog();
   if (s.running) { watching = true; setBtn(true); setTimeout(poll, 1500); return; }
   setBtn(false);
   await refreshHistory();
@@ -1454,7 +1466,9 @@ function selectNode(i){
 })();
 // —— 首次使用精靈 + 回首頁 ——
 function goHome(){
+  navSeq++;
   current = "";
+  syncLog();
   document.getElementById('tabs').style.display = 'none';
   document.getElementById('askpanel').style.display = 'none';
   document.getElementById('recbox').style.display = 'none';
