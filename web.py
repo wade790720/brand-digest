@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -21,7 +22,8 @@ PORT = 8765
 
 # 同時只允許一個任務（轉錄吃滿 GPU，跑兩個只會更慢）
 _lock = threading.Lock()
-_state = {"running": False, "log": [], "creator": ""}
+# ok：None＝還沒跑完、True＝成功、False＝失敗（error 是給使用者看的原因）
+_state = {"running": False, "log": [], "creator": "", "ok": None, "error": ""}
 
 # 2FA 登入要分兩步，第一步的 loader 先留在記憶體等驗證碼
 _pending_2fa = {}
@@ -434,7 +436,25 @@ def _save_session(loader, user: str) -> dict:
     return {"ok": True, "user": user}
 
 
+def _failure_reason(log: list[str]) -> str:
+    """從執行紀錄找出給使用者看的失敗原因：最後一行有內容、且不是進度條的訊息。
+    Python 例外的最後一行剛好是「XxxError: 原因」，sys.exit 的訊息也在最後。"""
+    for line in reversed(log):
+        s = line.strip()
+        if s and "it/s" not in s and "%|" not in s and not s.startswith("（"):
+            return s[:300]
+    return "執行失敗，但沒有留下錯誤訊息。"
+
+
+def _latest_output_since(started: float) -> str:
+    """貼文模式跑完才知道是哪個博主：找這次執行期間被寫入的知識庫。找不到就回空字串。"""
+    out = ROOT / "output"
+    files = [p for p in out.glob("*.md") if p.stat().st_mtime >= started - 1] if out.is_dir() else []
+    return max(files, key=lambda p: p.stat().st_mtime).stem if files else ""
+
+
 def _run(urls: list[str], limit: int, skip_fetch: bool):
+    started = time.time()
     # 打包成 exe：用 [exe, --pipeline, ...] 再叫自己（launcher 會 dispatch 到抓取+萃取）
     # 開發：用 [python, -u, go.py, ...]
     if getattr(sys, "frozen", False):
@@ -444,13 +464,25 @@ def _run(urls: list[str], limit: int, skip_fetch: bool):
     if skip_fetch:
         cmd.append("--skip-fetch")
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
-    proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            stdin=subprocess.DEVNULL,  # 網頁模式沒終端，別讓登入提示卡死
-                            text=True, encoding="utf-8", errors="replace", env=env)
-    for line in proc.stdout:
-        _state["log"].append(line.rstrip())
-    proc.wait()
-    _state["log"].append("（完成）" if proc.returncode == 0 else f"（失敗，exit code {proc.returncode}）")
+    try:
+        proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL,  # 網頁模式沒終端，別讓登入提示卡死
+                                text=True, encoding="utf-8", errors="replace", env=env)
+        for line in proc.stdout:
+            _state["log"].append(line.rstrip())
+        code = proc.wait()
+    except Exception as err:          # 連程序都啟動不了（例如找不到 python）
+        _state["log"].append(f"無法啟動抓取程序：{err}")
+        code = -1
+
+    if code == 0:
+        if not _state["creator"]:
+            _state["creator"] = _latest_output_since(started)
+        _state.update(ok=True, error="")
+        _state["log"].append("（完成）")
+    else:
+        _state.update(ok=False, error=_failure_reason(_state["log"]))
+        _state["log"].append(f"（失敗，exit code {code}）")
     _state["running"] = False
 
 
@@ -532,6 +564,13 @@ PAGE = r"""<!doctype html><html lang="zh-Hant"><meta charset="utf-8">
   details summary:hover{color:var(--on-surface)}
   /* ===== 主區 ===== */
   #main{flex:1;height:100vh;overflow-y:auto;background:var(--surface)}
+  /* 執行失敗卡片 */
+  #runerr{margin-top:1rem;background:var(--error-container);color:var(--on-error-container);
+    border-radius:var(--r-md);padding:1rem 1.25rem}
+  #runerr .re-title{font-size:1rem;font-weight:500;margin-bottom:.35rem}
+  #runerr .re-msg{font-size:.9rem;line-height:1.5;word-break:break-word}
+  #runerr .re-hint{font-size:.8rem;opacity:.8;margin-top:.5rem}
+  #runerr .re-actions{display:flex;gap:.5rem;margin-top:.8rem;flex-wrap:wrap}
   /* 連線中斷橫幅 */
   #offbar{display:none;background:var(--error-container);color:var(--on-error-container);
     padding:.65rem 1.5rem;font-size:.85rem;position:sticky;top:0;z-index:9}
@@ -749,13 +788,19 @@ PAGE = r"""<!doctype html><html lang="zh-Hant"><meta charset="utf-8">
     <div class="ctl">
       <button class="primary" id="btn" onclick="start()">開始萃取</button>
       <label>博主模式抓 <input type="number" id="limit" value="10" min="1" max="15" style="width:3.5rem"> 則</label>
-      <label><input type="checkbox" id="skipfetch"> 不重抓（只重新聚合既有）</label>
+      <label><input type="checkbox" id="skipfetch" autocomplete="off"> 不重抓（只重新聚合既有）</label>
     </div>
     <div class="hint" style="margin-top:.6rem">安全防護已內建：每則間隔 15–40 秒、單次上限 15 則、已抓過的自動跳過去拿下一批。</div>
   </div>
   </div>
 
-  <details style="margin-top:1rem"><summary class="hint">執行紀錄（本次）</summary>
+  <div id="runerr" role="alert" hidden>
+    <div class="re-title">這次萃取沒有完成</div>
+    <div class="re-msg" id="runerrmsg"></div>
+    <div class="re-hint">展開下方「執行紀錄」可以看完整過程。</div>
+  </div>
+
+  <details id="logbox" style="margin-top:1rem"><summary class="hint">執行紀錄（本次）</summary>
     <div id="log">（尚未執行）</div>
   </details>
 
@@ -970,6 +1015,7 @@ async function showOutput(name){
   if(!r) return;
   const kb = document.getElementById('kb');
   if (r.ok){
+    hideRunError();
     kb.innerHTML = md2html(await r.text());
     accordionize(kb, '來源索引');   // 來源索引摺疊成 accordion
     current = name;
@@ -1081,19 +1127,26 @@ function startCreator(){
   document.getElementById('skipfetch').checked = false;
   start();
 }
+function showRunError(msg){
+  document.getElementById('runerrmsg').textContent = msg;
+  document.getElementById('runerr').hidden = false;
+  document.getElementById('runerr').scrollIntoView({block:'nearest'});
+}
+function hideRunError(){ document.getElementById('runerr').hidden = true; }
+let watching = false;   // 這個頁面有在看一個執行中的任務，跑完才需要切換畫面
 async function start(){
   const b = document.getElementById('btn');
   if (b.disabled) return;                 // 已在跑，忽略連點
   const urls = document.getElementById('url').value.trim().split(/\s+/).filter(Boolean);
-  if(!urls.length){ alert('請貼上網址'); return; }
+  if(!urls.length){ showRunError('請先貼上 IG 網址，再按「開始萃取」。'); return; }
+  hideRunError();
   setBtn(true);                           // 立刻進 loading，避免重複送出
-  let r;
-  try {
-    r = await fetch('/run', {method:'POST', body: JSON.stringify({
-      urls, limit:+document.getElementById('limit').value,
-      skip_fetch:document.getElementById('skipfetch').checked })});
-  } catch(e){ setBtn(false); alert('連線失敗：'+e); return; }
-  if (!r.ok) { setBtn(false); alert((await r.json()).error); return; }
+  const r = await api('/run', {method:'POST', body: JSON.stringify({
+    urls, limit:+document.getElementById('limit').value,
+    skip_fetch:document.getElementById('skipfetch').checked })});
+  if (!r) { setBtn(false); showRunError('連不上前台伺服器。請確認「啟動前台」的視窗還開著，再試一次。'); return; }
+  if (!r.ok) { setBtn(false); showRunError((await r.json()).error || '無法開始萃取。'); return; }
+  watching = true;
   poll();
 }
 async function poll(){
@@ -1102,15 +1155,15 @@ async function poll(){
   const s = await r.json();
   const pre = document.getElementById('log');
   pre.textContent = s.log.join('\n') || '啟動中…'; pre.scrollTop = pre.scrollHeight;
-  if (s.running) { setBtn(true); setTimeout(poll, 1500); }
-  else {
-    setBtn(false);
-    await refreshHistory();
-    const lr = await api('/outputs'); if(!lr) return;
-    const list = await lr.json();
-    const target = s.creator && list.includes(s.creator) ? s.creator : list[0];
-    if (target && s.log.length) showOutput(target);
-  }
+  if (s.running) { watching = true; setBtn(true); setTimeout(poll, 1500); return; }
+  setBtn(false);
+  await refreshHistory();
+  if (!watching) return;                      // 頁面剛載入、沒有在等任務：不要自動切畫面
+  watching = false;
+  document.getElementById('skipfetch').checked = false;
+  // 失敗：留在原畫面顯示原因，絕不改顯示別的博主（舊版會退回清單第一個，看起來像「跳回去」）
+  if (s.ok === false) { showRunError(s.error); document.getElementById('logbox').open = true; return; }
+  if (s.ok && s.creator) showOutput(s.creator);
 }
 async function refreshLogin(){
   const lr = await api('/login_status'); if(!lr) return;
@@ -1524,10 +1577,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     creator = username_from_url(urls[0])
                 except SystemExit as e:
                     return self._json({"error": str(e)}, 400)
-            _state.update(running=True, log=[], creator=creator)
+            skip_fetch = bool(body.get("skip_fetch"))
+            if skip_fetch and creator and not (ROOT / "raw" / creator).is_dir():
+                return self._json({"error": f"「{creator}」還沒有抓過任何貼文。請取消勾選「不重抓」，再開始萃取。"}, 400)
+            _state.update(running=True, log=[], creator=creator, ok=None, error="")
         threading.Thread(
             target=_run,
-            args=(urls, int(body.get("limit", 10)), bool(body.get("skip_fetch"))),
+            args=(urls, int(body.get("limit", 10)), skip_fetch),
             daemon=True,
         ).start()
         self._json({"ok": True})
@@ -1538,7 +1594,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 class _Server(http.server.ThreadingHTTPServer):
     daemon_threads = True          # 請求執行緒不擋關閉
-    allow_reuse_address = True     # 重啟不會撞 address in use
+    # Linux/mac：重啟時不會撞 address in use。
+    # Windows 不能開：它的 SO_REUSEADDR 會讓第二個伺服器也綁上同一個埠，兩個程序搶著回應（頁面時新時舊）。
+    allow_reuse_address = sys.platform != "win32"
 
     def handle_error(self, request, client_address):
         # 單一請求出錯只記 log，絕不讓整個伺服器倒掉
